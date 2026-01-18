@@ -10,3 +10,7 @@ data/*
 data
 output/*
 .idea/*
+.vscode/*
+=10.1
+markdown/*
+result_keypoints.json

@@ -26,7 +26,7 @@ def parse_args():
     parser.add_argument(
         '--resume-from', help='the checkpoint file to resume from')
     parser.add_argument(
-        '--auto-resume', type=bool, default=True, help='automatically detect the latest checkpoint in word dir and resume from it.')
+        '--auto-resume', action='store_true', help='automatically detect the latest checkpoint in word dir and resume from it.')
     parser.add_argument(
         '--no-validate',
         action='store_true',

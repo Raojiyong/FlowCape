@@ -46,7 +46,7 @@ channel_cfg = dict(
 
 # model settings
 model = dict(
-    type='CapeXModel',
+    type='FlowPoseModel',
     pretrained='pretrained/swinv2_tiny_patch4_window16_256.pth',
     text_pretrained='pretrained/Alibaba-NLP/gte-base-en-v1.5',
     finetune_text_pretrained=False,
@@ -60,35 +60,28 @@ model = dict(
         img_size=256,
         upsample="bilinear"
     ),
+    rfm_cfg=dict(
+        num_timesteps=10,
+        t_epsilon=1e-3,
+        guidance_scale=0.0 # Handled via test_cfg.keyness_lambda
+    ),
     keypoint_head=dict(
-        type='PoseHead',
+        type='RiemannianPoseHead',
         img_in_channels=768,
         text_in_channels=768,
-        transformer=dict(
-            type='EncoderDecoder',
-            d_model=256,
-            nhead=8,
-            num_encoder_layers=3,
-            num_decoder_layers=3,
-            graph_decoder='pre',
-            dim_feedforward=768,
-            dropout=0.1,
-            similarity_proj_dim=256,
-            dynamic_proj_dim=128,
-            activation="relu",
-            normalize_before=False,
-            return_intermediate_dec=True),
-        share_kpt_branch=False,
-        num_decoder_layer=3,
-        with_heatmap_loss=True,
-
-        heatmap_loss_weight=2.0,
-        support_order_dropout=-1,
-        positional_encoding=dict(
-            type='SinePositionalEncoding', num_feats=128, normalize=True)),
+        hidden_dim=256,
+        time_embed_dim=128,
+        with_heatmap=True,
+        heatmap_size=64,
+        dropout=0.1
+    ),
     # training and testing settings
     train_cfg=dict(),
     test_cfg=dict(
+        target_type='GaussianHeatMap',
+        use_flow_ode=True,
+        use_keyness_guidance=True,
+        keyness_lambda=0.1,
         flip_test=False,
         post_process='default',
         shift_heatmap=True,
@@ -121,6 +114,10 @@ train_pipeline = [
         meta_keys=[
             'image_file', 'joints_3d', 'joints_3d_visible', 'center', 'scale',
             'rotation', 'bbox_score', 'flip_pairs', 'category_id', 'skeleton',
+            'sample_image_file', 'sample_joints_3d', 'sample_joints_3d_visible', 
+            'sample_center', 'sample_scale', 'sample_rotation', 'sample_skeleton',
+            'sample_point_descriptions', 'query_joints_3d', 'query_image_file', 
+            'query_scale', 'query_center', 'query_skeleton'
         ]),
 ]
 
@@ -138,8 +135,11 @@ valid_pipeline = [
         keys=['img', 'target', 'target_weight'],
         meta_keys=[
             'image_file', 'joints_3d', 'joints_3d_visible', 'center', 'scale', 'rotation', 'bbox_score',
-            'flip_pairs', 'category_id',
-            'skeleton',
+            'flip_pairs', 'category_id', 'skeleton',
+            'sample_image_file', 'sample_joints_3d', 'sample_joints_3d_visible', 
+            'sample_center', 'sample_scale', 'sample_rotation', 'sample_skeleton',
+            'sample_point_descriptions', 'query_joints_3d', 'query_image_file', 
+            'query_scale', 'query_center', 'query_skeleton', 'query_bbox_score', 'query_bbox_id'
         ]),
 ]
 
@@ -147,18 +147,12 @@ test_pipeline = valid_pipeline
 
 data_root = 'data/mp100'
 data = dict(
-    # samples_per_gpu=16,
-    # workers_per_gpu=16,
-    # samples_per_gpu=45,
     samples_per_gpu=16,
     workers_per_gpu=16,
-    # samples_per_gpu=8,
-    # workers_per_gpu=8,
     train=dict(
         type='TransformerPoseDataset',
         ann_file=f'{data_root}/annotations_graph/mp100_split1_train.json',
         img_prefix=f'{data_root}/images/',
-        # img_prefix=f'{data_root}',
         data_cfg=data_cfg,
         valid_class_ids=None,
         max_kpt_num=channel_cfg['max_kpt_num'],
@@ -168,7 +162,6 @@ data = dict(
         type='TransformerPoseDataset',
         ann_file=f'{data_root}/annotations_graph/mp100_split1_val.json',
         img_prefix=f'{data_root}/images/',
-        # img_prefix=f'{data_root}',
         data_cfg=data_cfg,
         valid_class_ids=None,
         max_kpt_num=channel_cfg['max_kpt_num'],
@@ -180,7 +173,6 @@ data = dict(
         type='TestPoseDataset',
         ann_file=f'{data_root}/annotations_graph/mp100_split1_test.json',
         img_prefix=f'{data_root}/images/',
-        # img_prefix=f'{data_root}',
         data_cfg=data_cfg,
         valid_class_ids=None,
         max_kpt_num=channel_cfg['max_kpt_num'],

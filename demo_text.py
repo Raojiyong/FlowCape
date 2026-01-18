@@ -98,6 +98,16 @@ def parse_args():
         help='override some settings in the used config, the key-value pair '
              'in xxx=yyy format will be merged into config file. For example, '
              "'--cfg-options model.backbone.depth=18 model.backbone.with_cp=True'")
+    parser.add_argument(
+        '--flow-steps',
+        type=int,
+        default=None,
+        help='override rfm_cfg.num_timesteps for flow ODE integration')
+    parser.add_argument(
+        '--flow-guidance-scale',
+        type=float,
+        default=None,
+        help='override rfm_cfg.guidance_scale for flow ODE integration')
     args = parser.parse_args()
     return args
 
@@ -123,6 +133,11 @@ def main():
 
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
+    if hasattr(cfg.model, 'rfm_cfg'):
+        if args.flow_steps is not None:
+            cfg.model.rfm_cfg['num_timesteps'] = args.flow_steps
+        if args.flow_guidance_scale is not None:
+            cfg.model.rfm_cfg['guidance_scale'] = args.flow_guidance_scale
     # set cudnn_benchmark
     if cfg.get('cudnn_benchmark', False):
         torch.backends.cudnn.benchmark = True

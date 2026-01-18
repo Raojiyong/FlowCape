@@ -2,7 +2,7 @@ import os
 import json
 
 mp78_annotations_dir = 'data/mp78_annotations_settingB'
-mp100_annotations_dir = 'data/mp100/annotations'
+mp100_annotations_dir = 'data/mp100/annotations_graph'
 
 # iterate over all json files in mp78_annotations_dir:
 for mp78_annotation_file in [f for f in os.listdir(mp78_annotations_dir) if f.endswith('.json')]:

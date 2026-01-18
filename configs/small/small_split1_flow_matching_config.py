@@ -24,6 +24,7 @@ lr_config = dict(
     warmup_ratio=0.001,
     step=[160, 180])
 total_epochs = 200
+# total_epochs = 1
 log_config = dict(
     interval=50,
     hooks=[
@@ -46,46 +47,38 @@ channel_cfg = dict(
 
 # model settings
 model = dict(
-    type='CapeXModel',
-    pretrained='pretrained/swinv2_tiny_patch4_window16_256.pth',
+    type='FlowPoseModel',
+    pretrained='pretrained/swinv2_small_1k_500k.pth',
+    # pretrained="swinv2_base",
     text_pretrained='pretrained/Alibaba-NLP/gte-base-en-v1.5',
     finetune_text_pretrained=False,
     encoder_config=dict(
         type='SwinTransformerV2',
         embed_dim=96,
-        depths=[2, 2, 6, 2],
+        depths=[2, 2, 18, 2],
         num_heads=[3, 6, 12, 24],
         window_size=16,
-        drop_path_rate=0.2,
+        drop_path_rate=0.3,
         img_size=256,
         upsample="bilinear"
     ),
     keypoint_head=dict(
-        type='PoseHead',
+        type='RiemannianPoseHead',
         img_in_channels=768,
         text_in_channels=768,
-        transformer=dict(
-            type='EncoderDecoder',
-            d_model=256,
-            nhead=8,
-            num_encoder_layers=3,
-            num_decoder_layers=3,
-            graph_decoder='pre',
-            dim_feedforward=768,
-            dropout=0.1,
-            similarity_proj_dim=256,
-            dynamic_proj_dim=128,
-            activation="relu",
-            normalize_before=False,
-            return_intermediate_dec=True),
-        share_kpt_branch=False,
-        num_decoder_layer=3,
-        with_heatmap_loss=True,
-
-        heatmap_loss_weight=2.0,
-        support_order_dropout=-1,
-        positional_encoding=dict(
-            type='SinePositionalEncoding', num_feats=128, normalize=True)),
+        hidden_dim=256,
+        time_embed_dim=128,
+        with_heatmap=True,
+        heatmap_size=64,
+        dropout=0.1),
+    rfm_cfg=dict(
+        # Flow ODE solver settings
+        num_timesteps=30,
+        t_epsilon=1e-3,
+        guidance_scale=0.0,
+        atol=1e-5,
+        rtol=1e-5,
+    ),
     # training and testing settings
     train_cfg=dict(),
     test_cfg=dict(
@@ -93,7 +86,6 @@ model = dict(
         post_process='default',
         shift_heatmap=True,
         modulate_kernel=11))
-
 
 data_cfg = dict(
     image_size=[256, 256],
@@ -114,7 +106,8 @@ train_pipeline = [
         type='NormalizeTensor',
         mean=[0.485, 0.456, 0.406],
         std=[0.229, 0.224, 0.225]),
-    dict(type='TopDownGenerateTargetFewShot', sigma=1),
+    # Emit flow targets (x0, x1, mask) instead of Gaussian heatmaps
+    dict(type='GenerateFlowTargets'),
     dict(
         type='Collect',
         keys=['img', 'target', 'target_weight'],
@@ -132,7 +125,7 @@ valid_pipeline = [
         type='NormalizeTensor',
         mean=[0.485, 0.456, 0.406],
         std=[0.229, 0.224, 0.225]),
-    dict(type='TopDownGenerateTargetFewShot', sigma=1),
+    dict(type='GenerateFlowTargets'),
     dict(
         type='Collect',
         keys=['img', 'target', 'target_weight'],
@@ -155,7 +148,7 @@ data = dict(
     # samples_per_gpu=8,
     # workers_per_gpu=8,
     train=dict(
-        type='TransformerPoseDataset',
+        type='TransformerFlowPoseDataset',
         ann_file=f'{data_root}/annotations_graph/mp100_split1_train.json',
         img_prefix=f'{data_root}/images/',
         # img_prefix=f'{data_root}',
@@ -165,7 +158,7 @@ data = dict(
         num_shots=1,
         pipeline=train_pipeline),
     val=dict(
-        type='TransformerPoseDataset',
+        type='TransformerFlowPoseDataset',
         ann_file=f'{data_root}/annotations_graph/mp100_split1_val.json',
         img_prefix=f'{data_root}/images/',
         # img_prefix=f'{data_root}',
@@ -177,7 +170,7 @@ data = dict(
         num_episodes=100,
         pipeline=valid_pipeline),
     test=dict(
-        type='TestPoseDataset',
+        type='TestFlowPoseDataset',
         ann_file=f'{data_root}/annotations_graph/mp100_split1_test.json',
         img_prefix=f'{data_root}/images/',
         # img_prefix=f'{data_root}',

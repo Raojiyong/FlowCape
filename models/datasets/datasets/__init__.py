@@ -1,5 +1,9 @@
 from .mp100 import (FewShotKeypointDataset, FewShotBaseDataset,
-                    TransformerBaseDataset, TransformerPoseDataset)
+                    TransformerBaseDataset, TransformerPoseDataset,
+                    TransformerFlowPoseDataset
+                    )
 
 __all__ = ['FewShotBaseDataset', 'FewShotKeypointDataset',
-           'TransformerBaseDataset', 'TransformerPoseDataset']
+           'TransformerBaseDataset', 'TransformerPoseDataset',
+           'TransformerFlowPoseDataset'
+           ]
