@@ -53,9 +53,19 @@ def adjacency_from_edges(batch_edges: torch.Tensor, num_nodes: int) -> torch.Ten
     adj = torch.zeros((b, num_nodes, num_nodes), device=batch_edges.device)
     if batch_edges.numel() == 0:
         return adj
-    idx_b = torch.arange(b, device=batch_edges.device)[:, None, None]
-    adj[idx_b, batch_edges[..., 0], batch_edges[..., 1]] = 1.0
-    adj[idx_b, batch_edges[..., 1], batch_edges[..., 0]] = 1.0
+
+    src = batch_edges[..., 0]
+    dst = batch_edges[..., 1]
+    valid = (src >= 0) & (dst >= 0) & (src < num_nodes) & (dst < num_nodes)
+    if not valid.any():
+        return adj
+
+    idx_b = torch.arange(b, device=batch_edges.device)[:, None].expand_as(src)
+    idx_b = idx_b[valid]
+    src = src[valid]
+    dst = dst[valid]
+    adj[idx_b, src, dst] = 1.0
+    adj[idx_b, dst, src] = 1.0
     return adj
 
 
@@ -144,6 +154,7 @@ class GraphFlowBlock(nn.Module):
         memory: torch.Tensor,
         adj: torch.Tensor,
         text_cond: torch.Tensor = None,
+        key_padding_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -151,10 +162,15 @@ class GraphFlowBlock(nn.Module):
             memory: [B, M, C] image memory
             adj: [B, N, N] adjacency matrix
             text_cond: [B, C] text conditioning for AdaLN (optional)
+            key_padding_mask: [B, N] True indicates padded nodes
         """
         # Self-attention over nodes
         residual = node_feat
-        node_feat = self.self_attn(node_feat, node_feat, node_feat)[0]
+        node_feat = self.self_attn(
+            node_feat,
+            node_feat,
+            node_feat,
+            key_padding_mask=key_padding_mask)[0]
         node_feat = self.dropout(node_feat) + residual
         if self.use_adaln and text_cond is not None:
             node_feat = self.norm1(node_feat, text_cond)
@@ -234,18 +250,31 @@ class GraphFlowEncoderDecoder(nn.Module):
         b, n, _ = node_feat.shape
         num_points = n
 
+        mask_f = mask.float()
+        mask_bool = mask_f.squeeze(-1) > 0
+
         t_emb = sinusoidal_time_embedding(t.view(b, 1), dim=self.time_mlp[0].in_features)
         t_emb = self.time_mlp(t_emb)[:, None, :]  # [B,1,C]
-        node_feat = node_feat + t_emb
+        node_feat = (node_feat + t_emb) * mask_f
 
         adj = adjacency_from_edges(skeleton, num_points)
+        adj = adj * mask_bool[:, None, :] * mask_bool[:, :, None]
         
         # Use mean of node features as text conditioning if not provided
         if text_cond is None:
-            text_cond = node_feat.mean(dim=1)  # [B, C]
+            denom = mask_f.sum(dim=1).clamp(min=1.0)
+            text_cond = (node_feat * mask_f).sum(dim=1) / denom  # [B, C]
+
+        pad_mask = ~mask_bool
+        if pad_mask.any():
+            all_true = pad_mask.all(dim=1)
+            if all_true.any():
+                pad_mask = pad_mask.clone()
+                pad_mask[all_true, 0] = False
 
         for blk in self.blocks:
-            node_feat = blk(node_feat, memory, adj, text_cond=text_cond)
+            node_feat = blk(node_feat, memory, adj, text_cond=text_cond, key_padding_mask=pad_mask)
+            node_feat = node_feat * mask_f
 
         # Output velocity v_pred (linear, no sigmoid) for flow matching
         # Range can be positive or negative

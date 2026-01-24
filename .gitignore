@@ -4,6 +4,7 @@ work_dirs/*
 work_dir/*
 pretrained/*
 */__pycache__
+*.pyc
 models/models/backbones/__pycache__
 models/models/utils/__pycache__
 data/*

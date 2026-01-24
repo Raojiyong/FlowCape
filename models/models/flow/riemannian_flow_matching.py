@@ -66,9 +66,16 @@ def laplacian_metric(
     # Initialize adjacency
     adj = torch.zeros(batch_size, num_points, num_points, device=device)
     if skeleton.numel() > 0:
-        idx_b = torch.arange(batch_size, device=device)[:, None, None]
-        adj[idx_b, skeleton[..., 0], skeleton[..., 1]] = 1.0
-        adj[idx_b, skeleton[..., 1], skeleton[..., 0]] = 1.0
+        src = skeleton[..., 0]
+        dst = skeleton[..., 1]
+        valid = (src >= 0) & (dst >= 0) & (src < num_points) & (dst < num_points)
+        if valid.any():
+            idx_b = torch.arange(batch_size, device=device)[:, None].expand_as(src)
+            idx_b = idx_b[valid]
+            src = src[valid]
+            dst = dst[valid]
+            adj[idx_b, src, dst] = 1.0
+            adj[idx_b, dst, src] = 1.0
 
     # Degree matrix
     deg = adj.sum(dim=-1)
@@ -213,4 +220,3 @@ def soft_argmax_heatmap(
     coords = torch.einsum("bnp,pd->bnd", probs, grid)
     conf = probs.max(dim=-1).values
     return coords, conf
-

@@ -50,6 +50,9 @@ model = dict(
     pretrained='pretrained/swinv2_tiny_patch4_window16_256.pth',
     text_pretrained='pretrained/Alibaba-NLP/gte-base-en-v1.5',
     finetune_text_pretrained=False,
+    align_cfg=dict(
+        enable=False,  # Not used in Rectified Flow (x0 = centered support pose)
+    ),
     encoder_config=dict(
         type='SwinTransformerV2',
         embed_dim=96,
@@ -79,8 +82,8 @@ model = dict(
     ),
     # training and testing settings
     train_cfg=dict(
-        num_sampled_t=4,
-        ode_step_loss_weight=0.1,
+        with_ode_loss=True,  # End-to-end ODE loss for train/test consistency
+        with_heatmap_loss=False,
     ),
     test_cfg=dict(
         use_flow_ode=True,
@@ -88,8 +91,13 @@ model = dict(
         post_process='default',
         shift_heatmap=True,
         modulate_kernel=11,
+        # Keyness guidance (optional, disabled by default for Rectified Flow)
         use_keyness_guidance=False,
-        keyness_lambda=0.1))
+        keyness_lambda=0.1,
+        use_keyness_refine=False,
+        keyness_refine_steps=3,
+        keyness_refine_lambda=0.05,
+    ))
 
 data_cfg = dict(
     image_size=[256, 256],
@@ -118,6 +126,7 @@ train_pipeline = [
         meta_keys=[
             'image_file', 'joints_3d', 'joints_3d_visible', 'center', 'scale',
             'rotation', 'bbox', 'bbox_score', 'flip_pairs', 'category_id', 'skeleton',
+            'align_weight',
         ]),
 ]
 
@@ -137,6 +146,7 @@ valid_pipeline = [
             'image_file', 'joints_3d', 'joints_3d_visible', 'center', 'scale', 'rotation', 'bbox', 'bbox_score',
             'flip_pairs', 'category_id',
             'skeleton',
+            'align_weight',
         ]),
 ]
 

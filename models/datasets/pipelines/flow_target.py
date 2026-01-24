@@ -18,6 +18,28 @@ from mmpose.datasets.builder import PIPELINES
 class GenerateFlowTargets:
     """Generate flow targets (x0, x1, mask) for flow-matching training."""
 
+    def __init__(self, use_skeleton_weights=False, skeleton_weight_strength=1.0):
+        self.use_skeleton_weights = use_skeleton_weights
+        self.skeleton_weight_strength = skeleton_weight_strength
+
+    def _compute_align_weight(self, skeleton, num_joints, vis_mask):
+        weight = np.ones((num_joints,), dtype=np.float32)
+        if self.use_skeleton_weights and skeleton is not None and len(skeleton) > 0:
+            edges = np.array(skeleton, dtype=np.int64)
+            if edges.ndim == 2 and edges.shape[1] == 2 and edges.size > 0:
+                max_idx = edges.max()
+                if max_idx == num_joints:
+                    edges = edges - 1
+                deg = np.zeros((num_joints,), dtype=np.float32)
+                for u, v in edges:
+                    if 0 <= u < num_joints:
+                        deg[u] += 1.0
+                    if 0 <= v < num_joints:
+                        deg[v] += 1.0
+                weight = weight + self.skeleton_weight_strength * deg
+        weight = weight * vis_mask
+        return weight
+
     def __call__(self, results):
         joints_3d = results['joints_3d']  # query joints
         joints_3d_visible = results['joints_3d_visible']
@@ -48,6 +70,10 @@ class GenerateFlowTargets:
         results['flow_x1'] = torch.tensor(x1, dtype=torch.float32)
         results['flow_mask'] = torch.tensor(mask, dtype=torch.float32)[:, None]  # [N,1]
 
+        skeleton = results.get('skeleton', None)
+        align_weight = self._compute_align_weight(skeleton, num_joints, mask1)
+        results['align_weight'] = align_weight[:, None]
+
         # Create placeholder target for pipeline compatibility.
         # Keep a correct visibility-based target_weight because downstream code
         # uses it as the point mask (support/query visibility, and later combined).
@@ -55,4 +81,3 @@ class GenerateFlowTargets:
         results['target_weight'] = (joints_3d_visible[:, 0] > 0).astype(np.float32)[:, None]
 
         return results
-

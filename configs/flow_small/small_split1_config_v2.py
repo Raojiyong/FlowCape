@@ -52,9 +52,6 @@ model = dict(
     # pretrained="swinv2_base",
     text_pretrained='pretrained/Alibaba-NLP/gte-base-en-v1.5',
     finetune_text_pretrained=False,
-    align_cfg=dict(
-        enable=False,  # Not used in Rectified Flow
-    ),
     encoder_config=dict(
         type='SwinTransformerV2',
         embed_dim=96,
@@ -127,7 +124,6 @@ train_pipeline = [
         meta_keys=[
             'image_file', 'joints_3d', 'joints_3d_visible', 'center', 'scale',
             'rotation', 'bbox_score', 'flip_pairs', 'category_id', 'skeleton',
-            'align_weight',
         ]),
 ]
 
@@ -147,7 +143,6 @@ valid_pipeline = [
             'image_file', 'joints_3d', 'joints_3d_visible', 'center', 'scale', 'rotation', 'bbox_score',
             'flip_pairs', 'category_id',
             'skeleton',
-            'align_weight',
         ]),
 ]
 
@@ -164,7 +159,7 @@ data = dict(
     # workers_per_gpu=8,
     train=dict(
         type='TransformerFlowPoseDataset',
-        ann_file=f'{data_root}/annotations_graph/mp100_split2_train.json',
+        ann_file=f'{data_root}/annotations_graph/mp100_split1_train.json',
         img_prefix=f'{data_root}/images/',
         # img_prefix=f'{data_root}',
         data_cfg=data_cfg,
@@ -174,7 +169,7 @@ data = dict(
         pipeline=train_pipeline),
     val=dict(
         type='TransformerFlowPoseDataset',
-        ann_file=f'{data_root}/annotations_graph/mp100_split2_test.json',
+        ann_file=f'{data_root}/annotations_graph/mp100_split1_val.json',
         img_prefix=f'{data_root}/images/',
         # img_prefix=f'{data_root}',
         data_cfg=data_cfg,
@@ -186,7 +181,7 @@ data = dict(
         pipeline=valid_pipeline),
     test=dict(
         type='TestFlowPoseDataset',
-        ann_file=f'{data_root}/annotations_graph/mp100_split2_test.json',
+        ann_file=f'{data_root}/annotations_graph/mp100_split1_test.json',
         img_prefix=f'{data_root}/images/',
         # img_prefix=f'{data_root}',
         data_cfg=data_cfg,

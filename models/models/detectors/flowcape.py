@@ -100,6 +100,7 @@ class FlowPoseModel(BasePose):
                  text_pretrained=False,
                  finetune_text_pretrained=False,
                  rfm_cfg=None,
+                 align_cfg=None,
                  train_cfg=None,
                  test_cfg=None):
         super().__init__()
@@ -108,12 +109,14 @@ class FlowPoseModel(BasePose):
         self.text_backbone, self.tokenizer, self.text_backbone_type = self.init_text_backbone(text_pretrained)
         self.keypoint_head = builder.build_head(keypoint_head)
         self.keypoint_head.init_weights()
-        self.train_cfg = {} if train_cfg is None else train_cfg
-        self.test_cfg = test_cfg
-        self.target_type = test_cfg.get('target_type', 'GaussianHeatMap')  # GaussianHeatMap
+        self.train_cfg = train_cfg if train_cfg is not None else {}
+        self.test_cfg = test_cfg if test_cfg is not None else {}
+        self.target_type = self.test_cfg.get('target_type', 'GaussianHeatMap')
         self.use_flow_ode = self.test_cfg.get('use_flow_ode', True)
         self.rfm_cfg = RFMConfig(**rfm_cfg) if rfm_cfg is not None else RFMConfig()
         self.flow_solver = FlowODEIntegrator(self.rfm_cfg) if self.use_flow_ode else None
+        # align_cfg is accepted but not used in Rectified Flow (kept for config compatibility)
+        self.align_cfg = align_cfg
 
 
     def init_text_backbone(self, text_pretrained):
@@ -187,7 +190,7 @@ class FlowPoseModel(BasePose):
     def init_weights(self, pretrained=None):
         """Weight initialization for model."""
         self.backbone.init_weights(pretrained)
-        # self.encoder_query.init_weights(pretrained) # Removed as not defined
+        self.encoder_query.init_weights(pretrained)
         self.keypoint_head.init_weights()
 
     def forward(self,
@@ -217,35 +220,34 @@ class FlowPoseModel(BasePose):
             img_s, target_s, target_weight_s, img_q, img_metas)
 
     def _get_centered_support_pose(self, img_metas, device, img_size, mask_s=None):
-        """Get support pose (shot 0), normalized and centered to image center.
+        """Get support pose (shot 0), normalized and centered to visible points' centroid.
         
         Args:
-            img_metas: List of image meta dicts.
-            device: Tensor device.
-            img_size: Tensor [W, H].
-            mask_s: Visibility mask [B, N, 1] (Optional).
+            img_metas: List of image meta info dicts.
+            device: Torch device.
+            img_size: Tensor [w, h] for normalization.
+            mask_s: Optional visibility mask [B, N, 1].
+            
+        Returns:
+            x0_centered: [B, N, 2] normalized coords centered at image center (0.5, 0.5).
         """
-        # Get raw support joints [B, num_samples, N, 2] -> take 1st shot [B, N, 2]
-        support_kpts = self.parse_keypoints_from_img_meta(img_metas, device, keyword='sample')[:, 0]
+        # Get raw support keypoints and normalize to [0, 1]
+        sample_keypoints = self.parse_keypoints_from_img_meta(
+            img_metas, device, keyword='sample')  # [B, num_shots, N, 2]
+        x0 = sample_keypoints[:, 0, :, :] / img_size  # [B, N, 2] in [0, 1]
         
-        # Normalize to [0,1]
-        x0 = support_kpts / img_size
-        
-        # Center alignment: Shift support pose so its center matches query image center (0.5, 0.5)
-        # We calculate the center of the support pose using visible points if mask is provided
         if mask_s is not None:
-            # mask_s: [B, N, 1]
-            sum_vis = mask_s.sum(dim=1).clamp(min=1) # [B, 1]
-            means = (x0 * mask_s).sum(dim=1) / sum_vis # [B, 2]
-            means = means.unsqueeze(1) # [B, 1, 2]
+            # Center to visible points' centroid
+            mask = mask_s.squeeze(-1) if mask_s.dim() == 3 else mask_s  # [B, N]
+            sum_vis = mask.sum(dim=1, keepdim=True).clamp(min=1)  # [B, 1]
+            centroid = (x0 * mask.unsqueeze(-1)).sum(dim=1, keepdim=True) / sum_vis.unsqueeze(-1)  # [B, 1, 2]
         else:
-            means = x0.mean(dim=1, keepdim=True) # [B, 1, 2]
-
-        x0 = x0 - means + 0.5
+            centroid = x0.mean(dim=1, keepdim=True)  # [B, 1, 2]
         
-        return x0.clamp(0.0, 1.0)
-
-
+        # Translate so centroid is at image center (0.5, 0.5)
+        x0_centered = x0 - centroid + 0.5
+        
+        return x0_centered.clamp(0.0, 1.0)
 
     def forward_train(self,
                       img_s,
@@ -257,10 +259,10 @@ class FlowPoseModel(BasePose):
                       img_metas,
                       **kwargs):
 
-        """Defines the computation performed at every call when training."""
+        """Rectified Flow training: Support Pose -> Query Pose."""
         bs, _, h, w = img_q.shape
 
-        # Parse target keypoints (Query)
+        # Parse target keypoints
         target_keypoints = self.parse_keypoints_from_img_meta(img_metas, img_q.device, keyword='query')
         
         # Extract features
@@ -272,32 +274,44 @@ class FlowPoseModel(BasePose):
         
         img_size = torch.tensor([w, h], device=img_q.device).float()
         
-        # === Corrected Riemannian Flow Matching (idea.md) ===
-        # x0 = Support Pose (Centered) - Source distribution
-        # x1 = Query Pose - Target distribution
-        
+        # === Rectified Flow: Support Pose -> Query Pose ===
+        # x0 = Support Pose (centered) - SAME as test time!
+        # x1 = Query Pose (GT)
         x0 = self._get_centered_support_pose(img_metas, img_q.device, img_size, mask_s)
         x1 = target_keypoints / img_size  # [B, N, 2] in [0,1]
-
-        # Combine masks: We only train flow on points valid in both Support AND Query
-        # If support points are invalid, x0 is garbage/zero.
-        valid_mask = target_weight_q.squeeze(-1) * mask_s.squeeze(-1) # [B, N]
+        
+        # Visibility mask: only train on points visible in BOTH support and query
+        valid_mask = target_weight_q.squeeze(-1) * mask_s.squeeze(-1)  # [B, N]
         
         # Target velocity (constant for linear interpolation)
         v_target = x1 - x0  # [B, N, 2]
+        
+        # Sample time t ~ U[0, 1]
+        t = torch.rand((bs, 1, 1), device=img_q.device)
+        
+        # Interpolate to get x_t
+        x_t = (1 - t) * x0 + t * x1  # [B, N, 2]
+        
+        # Predict velocity field v(x_t, t)
+        output, _, similarity_map = self.keypoint_head(
+            feature_q, feature_s, target_s, mask_s,
+            skeleton, all_shots_point_descriptions,
+            coords=x_t, t=t)
+        
+        v_pred = output[-1]  # [B, N, 2] predicted velocity
+        
+        # Predicted coordinates (for accuracy calculation)
+        pred_coords = x_t + v_pred * (1 - t)
         
         target_sizes = torch.tensor([w, h], device=img_q.device).float().unsqueeze(0).repeat(bs, 1, 1)
 
         # === Compute Losses ===
         losses = dict()
         if self.with_keypoint:
-            # Use intersection mask for flow losses to ensure validity of source and target
             mask = valid_mask
             normalizer = mask.sum(dim=-1).clamp(min=1)  # [B]
             
-            # === 1. Riemannian Flow Matching Loss (idea.md §2.2) ===
-
-            # L_RFM = ||v_pred - v_target||^2_M(G) where M is Laplacian metric
+            # === 1. Riemannian Flow Matching Loss ===
             skeleton_edges = [meta['sample_skeleton'][0] for meta in img_metas]
             skeleton_tensors = [
                 torch.tensor(edges, device=img_q.device, dtype=torch.long) if len(edges) > 0
@@ -309,102 +323,53 @@ class FlowPoseModel(BasePose):
             # Compute Laplacian metric M(G)
             M = laplacian_metric(skeleton_tensor, mask, num_points=max_points)  # [B, N, N]
             
-            # Sample multiple t for time-axis supervision
-            num_t_samples = int(self.train_cfg.get('num_sampled_t', 1))
-            num_t_samples = max(1, num_t_samples)
-
-            rfm_loss_acc = 0.0
-            flow_loss_acc = 0.0
-            kpt_loss_acc = 0.0
-            first_output = None
-            first_x_t = None
-            first_similarity_map = None
-
-            for t_idx in range(num_t_samples):
-                # Sample time t ~ U[0, 1]
-                t = torch.rand((bs, 1, 1), device=img_q.device)
-
-                # Interpolate to get x_t (Linear Geodesic approx)
-                x_t = (1 - t) * x0 + t * x1  # [B, N, 2]
-
-                # Predict velocity field v(x_t, t)
-                # Note: We pass coords=x_t to condition the field on current geometry
-                output, _, similarity_map = self.keypoint_head(
-                    feature_q, feature_s, target_s, mask_s,
-                    skeleton, all_shots_point_descriptions,
-                    coords=x_t, t=t)
-
-                v_pred = output[-1]  # [B, N, 2] predicted velocity
-
-                # Predicted coordinates (Euler step from x_t to x1 using v_pred)
-                pred_coords = x_t + v_pred * (1 - t)
-
-                # Velocity difference
-                diff = v_pred - v_target  # [B, N, 2]
-
-                # Riemannian weighted loss: (v_pred - v_target)^T * M * (v_pred - v_target)
-                # For each coordinate dimension
-                M_diff = torch.bmm(M, diff)  # [B, N, 2]
-                rfm_loss = (diff * M_diff * mask.unsqueeze(-1)).sum(dim=[1, 2]) / normalizer
-                rfm_loss_acc = rfm_loss_acc + rfm_loss.mean()
-
-                # Also keep simple flow loss for stability
-                flow_loss = F.mse_loss(v_pred, v_target, reduction='none')  # [B, N, 2]
-                flow_loss = (flow_loss.sum(dim=-1) * mask).sum(dim=-1) / normalizer
-                flow_loss_acc = flow_loss_acc + flow_loss.mean()
-
-                # 2. Auxiliary L1 loss on predicted coordinates
-                kpt_loss = F.l1_loss(pred_coords, x1, reduction='none')
-                kpt_loss = (kpt_loss.sum(dim=-1) * mask).sum(dim=-1) / normalizer
-                kpt_loss_acc = kpt_loss_acc + kpt_loss.mean()
-
-                if t_idx == 0:
-                    first_output = output
-                    first_x_t = x_t
-                    first_similarity_map = similarity_map
-
-            losses['rfm_loss'] = rfm_loss_acc / num_t_samples
-            losses['flow_loss'] = flow_loss_acc / num_t_samples
-            losses['kpt_loss'] = (kpt_loss_acc / num_t_samples) * 0.5
-
+            # Velocity difference
+            diff = v_pred - v_target  # [B, N, 2]
+            
+            # Riemannian weighted loss
+            M_diff = torch.bmm(M, diff)  # [B, N, 2]
+            rfm_loss = (diff * M_diff * mask.unsqueeze(-1)).sum(dim=[1, 2]) / normalizer
+            losses['rfm_loss'] = rfm_loss.mean()
+            
+            # Simple flow loss for stability
+            flow_loss = F.mse_loss(v_pred, v_target, reduction='none')  # [B, N, 2]
+            flow_loss = (flow_loss.sum(dim=-1) * mask).sum(dim=-1) / normalizer
+            losses['flow_loss'] = flow_loss.mean()
+            
+            # 2. Auxiliary L1 loss on predicted coordinates
+            kpt_loss = F.l1_loss(pred_coords, x1, reduction='none')
+            kpt_loss = (kpt_loss.sum(dim=-1) * mask).sum(dim=-1) / normalizer
+            losses['kpt_loss'] = kpt_loss.mean() * 0.5
+            
             # 3. Heatmap loss (if enabled)
-            if first_similarity_map is not None and target_q is not None:
+            if similarity_map is not None and target_q is not None:
                 head_losses = self.keypoint_head.get_loss(
-                    first_output, first_x_t, first_similarity_map, target_keypoints,
+                    output, x_t, similarity_map, target_keypoints,
                     target_q, target_weight_q, target_sizes)
                 if 'heatmap_loss' in head_losses:
                     losses['heatmap_loss'] = head_losses['heatmap_loss']
             
-            # === 4. End-to-End ODE Loss (KEY for train/test consistency) ===
-            # Use SAME x0 as flow matching training for stable gradients
-            x_ode = x0.clone()  # Start from same noise used in flow matching
+            # === 4. ODE Loss (optional, for train/test consistency) ===
+            if self.train_cfg.get('with_ode_loss', True):
+                x_ode = x0.clone()  # Start from SAME x0 as flow matching
+                num_ode_steps = 3
+                dt = 1.0 / num_ode_steps
+                for step in range(num_ode_steps):
+                    t_ode = torch.full((bs, 1, 1), step * dt, device=img_q.device)
+                    out_ode, _, _ = self.keypoint_head(
+                        feature_q, feature_s, target_s, mask_s,
+                        skeleton, all_shots_point_descriptions,
+                        coords=x_ode, t=t_ode)
+                    v_ode = out_ode[-1]
+                    x_ode = x_ode + v_ode * dt
+                
+                ode_loss = F.l1_loss(x_ode, x1, reduction='none')
+                ode_loss = (ode_loss.sum(dim=-1) * mask).sum(dim=-1) / normalizer
+                losses['ode_loss'] = ode_loss.mean()
             
-            # ODE integration (match test steps for consistency)
-            num_ode_steps = max(1, int(self.rfm_cfg.num_timesteps))
-            dt = 1.0 / num_ode_steps
-            ode_step_weight = float(self.train_cfg.get('ode_step_loss_weight', 1.0))
-            ode_step_loss_acc = 0.0
-            for step in range(num_ode_steps):
-                t_ode = torch.full((bs, 1, 1), step * dt, device=img_q.device)
-                out_ode, _, _ = self.keypoint_head(
-                    feature_q, feature_s, target_s, mask_s,
-                    skeleton, all_shots_point_descriptions,
-                    coords=x_ode, t=t_ode)
-                v_ode = out_ode[-1]
-                # No clamp during training to allow gradient flow
-                x_ode = x_ode + v_ode * dt
-
-                step_loss = F.l1_loss(x_ode, x1, reduction='none')
-                step_loss = (step_loss.sum(dim=-1) * mask).sum(dim=-1) / normalizer
-                losses[f'ode_step_loss_{step}'] = step_loss.mean() * ode_step_weight
-                ode_step_loss_acc = ode_step_loss_acc + step_loss.mean()
-
-            # Cumulative ODE loss over steps (mean across steps)
-            losses['ode_loss'] = ode_step_loss_acc * ode_step_weight
-            
-            # Accuracy using ODE output (clamp only for evaluation, no gradient)
+            # Accuracy using single-step prediction
             keypoint_accuracy = self.keypoint_head.get_accuracy(
-                x_ode.detach().clamp(0.0, 1.0),
+                pred_coords.detach().clamp(0.0, 1.0),
                 target_keypoints,
                 target_weight_q,
                 target_sizes,
@@ -424,7 +389,7 @@ class FlowPoseModel(BasePose):
                      img_metas=None,
                      **kwargs):
 
-        """Defines the computation performed at every call when testing."""
+        """Rectified Flow inference: Integrate ODE from Support Pose."""
         batch_size, _, img_height, img_width = img_q.shape
 
         # Extract features
@@ -437,8 +402,7 @@ class FlowPoseModel(BasePose):
         
         img_size = torch.tensor([img_width, img_height], device=img_q.device).float()
         
-        # === Inference Flow: Support -> Query ===
-        # x0 = Centered Support Pose (Prior)
+        # === Rectified Flow: x0 = Support Pose (centered) - SAME as training! ===
         x = self._get_centered_support_pose(img_metas, img_q.device, img_size, mask_s)
         
         # ODE integration from t=0 to t=1
@@ -446,10 +410,9 @@ class FlowPoseModel(BasePose):
         dt = 1.0 / num_steps
         
         for step in range(num_steps):
-            # Current time
             t = torch.full((batch_size, 1, 1), step * dt, device=img_q.device)
             
-            # Predict velocity field v(x, t) and get heatmap for guidance
+            # Predict velocity field v(x, t)
             output, _, heatmap = self.keypoint_head(
                 feature_q, feature_s, target_s, mask_s,
                 skeleton, all_shots_point_descriptions,
@@ -457,15 +420,17 @@ class FlowPoseModel(BasePose):
             
             v_pred = output[-1]  # [B, N, 2] velocity
             
-            # === Keyness Guidance (idea.md Step 3) ===
-            # v_guided = v + lambda * grad(H(x))
-            if heatmap is not None and self.test_cfg.get('use_keyness_guidance', True):
+            # Optional: Keyness guidance
+            if heatmap is not None and self.test_cfg.get('use_keyness_guidance', False):
                 lambda_guidance = self.test_cfg.get('keyness_lambda', 0.1)
                 guidance = keyness_guidance(x, heatmap, lambda_=lambda_guidance)
                 v_pred = v_pred + guidance
             
             # Euler step
             x = x + v_pred * dt
+        
+        # Clamp final result to valid range
+        x = x.clamp(0.0, 1.0)
         
         predicted_pose = x.detach().cpu().numpy()
 
@@ -475,10 +440,7 @@ class FlowPoseModel(BasePose):
                 img_metas, predicted_pose, img_size=[img_width, img_height])
             result.update(keypoint_result)
 
-
-        result.update({
-            "points": predicted_pose
-        })
+        result.update({"points": predicted_pose})
         result.update({"sample_image_file": img_metas[0]['sample_image_file']})
 
         return result
@@ -520,18 +482,27 @@ class FlowPoseModel(BasePose):
         all_shots_point_descriptions = self.extract_text_features(img_metas, max_points, mask_s)
         feature_q, feature_s = self.extract_image_features(img_s, img_q)
 
-        # Flow matching: Support -> Query
+        # Flow matching: x0 = noise, x1 = target
         img_size = torch.tensor([img_width, img_height], device=img_q.device).float()
         
-        # Start from Centered Support Pose
-        x0 = self._get_centered_support_pose(img_metas, img_q.device, img_size, mask_s)
+        # Sample noise as x0 - use standard normal for better coverage
+        x0 = torch.randn((batch_size, max_points, 2), device=img_q.device) * 0.3 + 0.5
+        x0 = x0.clamp(0.05, 0.95)  # Keep in valid range with margin
         
         if training and target_keypoints is not None:
+            # Training: sample t uniformly, including near t=0 for inference consistency
             t = torch.rand((batch_size, 1, 1), device=img_q.device)
-            x1 = target_keypoints / img_size
+            # Allow t to be very close to 0 so model learns to predict from noise
+            t = t.clamp(min=1e-9, max=1.0)
+            
+            # Normalize target to [0, 1]
+            x1 = target_keypoints / img_size  # [B, N, 2]
+            
+            # Interpolate: x_t = (1-t) * x0 + t * x1
             x_t = (1 - t) * x0 + t * x1
             coords = x_t
         else:
+            # Inference: start from t=0 (handled in forward_test with ODE integration)
             t = torch.zeros((batch_size, 1, 1), device=img_q.device)
             x1 = None
             coords = x0

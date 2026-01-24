@@ -36,6 +36,7 @@ from models.models.utils.graph_flow_encoder import (
     GraphFlowEncoderDecoder,
     sinusoidal_time_embedding,
 )
+from models.models.utils.positional_encoding import SinePositionalEncoding
 
 
 @dataclass
@@ -61,6 +62,7 @@ class RiemannianPoseHead(nn.Module):
                  time_embed_dim=128,
                  with_heatmap=True,
                  heatmap_size=64,
+                 temperature=0.01,
                  dropout=0.1,
                  train_cfg=None,
                  test_cfg=None):
@@ -75,6 +77,9 @@ class RiemannianPoseHead(nn.Module):
         self.coord_proj = nn.Linear(2, hidden_dim)  # Project coords (x_t) to hidden dim
         self.time_embed_dim = time_embed_dim
         self.dropout = nn.Dropout(dropout)
+        self.temperature = float(temperature)
+        self.positional_encoding = SinePositionalEncoding(
+            num_feats=hidden_dim // 2, normalize=True)
 
         self.vector_head = GraphFlowEncoderDecoder(
             GraphFlowConfig(
@@ -83,9 +88,6 @@ class RiemannianPoseHead(nn.Module):
                 num_layers=3,
                 time_embed_dim=time_embed_dim,
                 dropout=dropout))
-
-        if self.with_heatmap:
-            self.heatmap_head = nn.Conv2d(hidden_dim, 1, kernel_size=1)
 
         self.init_weights()
 
@@ -116,9 +118,12 @@ class RiemannianPoseHead(nn.Module):
         """
         b, _, h, w = x.shape
         feat = self.img_proj(x)  # [B, hidden, H, W]
-        memory = feat.flatten(2).transpose(1, 2)  # [B, HW, hidden]
+        masks = feat.new_zeros((b, h, w), dtype=torch.bool)
+        pos_embed = self.positional_encoding(masks)
+        memory = (feat + pos_embed).flatten(2).transpose(1, 2)  # [B, HW, hidden]
 
-        txt = self.text_proj(point_descriptions)  # [B, N, hidden]
+        mask = mask_s.float()
+        txt = self.text_proj(point_descriptions) * mask  # [B, N, hidden]
 
         if t is None:
             t = torch.rand((b, 1, 1), device=x.device)
@@ -128,8 +133,8 @@ class RiemannianPoseHead(nn.Module):
             coords = torch.zeros((b, txt.shape[1], 2), device=x.device)
         
         # Condition node features on current position x_t
-        coord_feat = self.coord_proj(coords)  # [B, N, hidden]
-        node_feat = txt + coord_feat  # Fuse text with position info
+        coord_feat = self.coord_proj(coords) * mask  # [B, N, hidden]
+        node_feat = (txt + coord_feat) * mask  # Fuse text with position info
 
         edges = []
         for edges_list in skeleton:
@@ -137,11 +142,12 @@ class RiemannianPoseHead(nn.Module):
                 edges.append(torch.zeros((0, 2), device=x.device, dtype=torch.long))
             else:
                 edges.append(torch.tensor(edges_list, device=x.device, dtype=torch.long))
-        skeleton_tensor = torch.nn.utils.rnn.pad_sequence(edges, batch_first=True, padding_value=0)
+        skeleton_tensor = torch.nn.utils.rnn.pad_sequence(edges, batch_first=True, padding_value=-1)
         self.last_skeleton = skeleton_tensor
 
         # Pool text features for global conditioning (AdaLN, idea.md Step 4)
-        text_cond = txt.mean(dim=1)  # [B, hidden]
+        denom = mask.sum(dim=1).clamp(min=1.0)
+        text_cond = txt.sum(dim=1) / denom  # [B, hidden]
 
         v_pred, metric = self.vector_head(
             node_feat=node_feat,  # Use position-conditioned features
@@ -154,7 +160,12 @@ class RiemannianPoseHead(nn.Module):
 
         heatmap = None
         if self.with_heatmap:
-            heatmap = self.heatmap_head(feat)
+            # Per-point similarity map for keyness / refinement (idea.md Step 3).
+            feat_flat = feat.flatten(2).transpose(1, 2)  # [B, HW, hidden]
+            feat_norm = F.normalize(feat_flat, p=2, dim=-1)
+            txt_norm = F.normalize(txt, p=2, dim=-1)
+            sim = torch.bmm(txt_norm, feat_norm.transpose(1, 2)) / max(self.temperature, 1e-6)  # [B, N, HW]
+            heatmap = sim.view(b, txt.shape[1], h, w) * mask_s.squeeze(-1)[:, :, None, None]
 
         # Shape like PoseHead output for downstream usage
         # Output velocity field v_pred for flow matching

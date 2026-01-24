@@ -3,9 +3,9 @@ load_from = None
 resume_from = None
 dist_params = dict(backend='nccl')
 workflow = [('train', 1)]
-checkpoint_config = dict(interval=20)
+checkpoint_config = dict(interval=50)
 evaluation = dict(
-    interval=25,
+    interval=2,
     metric=['PCK', 'NME', 'AUC', 'EPE'],
     key_indicator='PCK',
     gpu_collect=True,
@@ -25,7 +25,7 @@ lr_config = dict(
     step=[160, 180])
 total_epochs = 200
 log_config = dict(
-    interval=50,
+    interval=500,
     hooks=[
         dict(type='TextLoggerHook'),
         dict(type='TensorboardLoggerHook')
@@ -50,6 +50,9 @@ model = dict(
     pretrained='pretrained/swinv2_tiny_patch4_window16_256.pth',
     text_pretrained='pretrained/Alibaba-NLP/gte-base-en-v1.5',
     finetune_text_pretrained=False,
+    align_cfg=dict(
+        enable=False,  # Not used in Rectified Flow
+    ),
     encoder_config=dict(
         type='SwinTransformerV2',
         embed_dim=96,
@@ -60,11 +63,6 @@ model = dict(
         img_size=256,
         upsample="bilinear"
     ),
-    rfm_cfg=dict(
-        num_timesteps=10,
-        t_epsilon=1e-3,
-        guidance_scale=0.0 # Handled via test_cfg.keyness_lambda
-    ),
     keypoint_head=dict(
         type='RiemannianPoseHead',
         img_in_channels=768,
@@ -73,20 +71,32 @@ model = dict(
         time_embed_dim=128,
         with_heatmap=True,
         heatmap_size=64,
-        dropout=0.1
+        dropout=0.1),
+    rfm_cfg=dict(
+        # Flow ODE solver settings
+        num_timesteps=10,
+        t_epsilon=1e-3,
+        guidance_scale=0.0,
+        atol=1e-5,
+        rtol=1e-5,
     ),
     # training and testing settings
-    train_cfg=dict(),
+    train_cfg=dict(
+        with_ode_loss=True,
+        with_heatmap_loss=False,
+    ),
     test_cfg=dict(
-        target_type='GaussianHeatMap',
         use_flow_ode=True,
-        use_keyness_guidance=True,
-        keyness_lambda=0.1,
         flip_test=False,
         post_process='default',
         shift_heatmap=True,
-        modulate_kernel=11))
-
+        modulate_kernel=11,
+        use_keyness_guidance=False,
+        keyness_lambda=0.1,
+        use_keyness_refine=False,
+        keyness_refine_steps=3,
+        keyness_refine_lambda=0.05,
+    ))
 
 data_cfg = dict(
     image_size=[256, 256],
@@ -107,17 +117,15 @@ train_pipeline = [
         type='NormalizeTensor',
         mean=[0.485, 0.456, 0.406],
         std=[0.229, 0.224, 0.225]),
-    dict(type='TopDownGenerateTargetFewShot', sigma=1),
+    # Emit flow targets (x0, x1, mask) instead of Gaussian heatmaps
+    dict(type='GenerateFlowTargets'),
     dict(
         type='Collect',
         keys=['img', 'target', 'target_weight'],
         meta_keys=[
             'image_file', 'joints_3d', 'joints_3d_visible', 'center', 'scale',
-            'rotation', 'bbox_score', 'flip_pairs', 'category_id', 'skeleton',
-            'sample_image_file', 'sample_joints_3d', 'sample_joints_3d_visible', 
-            'sample_center', 'sample_scale', 'sample_rotation', 'sample_skeleton',
-            'sample_point_descriptions', 'query_joints_3d', 'query_image_file', 
-            'query_scale', 'query_center', 'query_skeleton'
+            'rotation', 'bbox', 'bbox_score', 'flip_pairs', 'category_id', 'skeleton',
+            'align_weight',
         ]),
 ]
 
@@ -129,17 +137,15 @@ valid_pipeline = [
         type='NormalizeTensor',
         mean=[0.485, 0.456, 0.406],
         std=[0.229, 0.224, 0.225]),
-    dict(type='TopDownGenerateTargetFewShot', sigma=1),
+    dict(type='GenerateFlowTargets'),
     dict(
         type='Collect',
         keys=['img', 'target', 'target_weight'],
         meta_keys=[
-            'image_file', 'joints_3d', 'joints_3d_visible', 'center', 'scale', 'rotation', 'bbox_score',
-            'flip_pairs', 'category_id', 'skeleton',
-            'sample_image_file', 'sample_joints_3d', 'sample_joints_3d_visible', 
-            'sample_center', 'sample_scale', 'sample_rotation', 'sample_skeleton',
-            'sample_point_descriptions', 'query_joints_3d', 'query_image_file', 
-            'query_scale', 'query_center', 'query_skeleton', 'query_bbox_score', 'query_bbox_id'
+            'image_file', 'joints_3d', 'joints_3d_visible', 'center', 'scale', 'rotation', 'bbox', 'bbox_score',
+            'flip_pairs', 'category_id',
+            'skeleton',
+            'align_weight',
         ]),
 ]
 
@@ -147,21 +153,28 @@ test_pipeline = valid_pipeline
 
 data_root = 'data/mp100'
 data = dict(
+    # samples_per_gpu=16,
+    # workers_per_gpu=16,
+    # samples_per_gpu=45,
     samples_per_gpu=16,
     workers_per_gpu=16,
+    # samples_per_gpu=8,
+    # workers_per_gpu=8,
     train=dict(
-        type='TransformerPoseDataset',
+        type='TransformerFlowPoseDataset',
         ann_file=f'{data_root}/annotations_graph/mp100_split1_train.json',
         img_prefix=f'{data_root}/images/',
+        # img_prefix=f'{data_root}',
         data_cfg=data_cfg,
         valid_class_ids=None,
         max_kpt_num=channel_cfg['max_kpt_num'],
         num_shots=1,
         pipeline=train_pipeline),
     val=dict(
-        type='TransformerPoseDataset',
+        type='TransformerFlowPoseDataset',
         ann_file=f'{data_root}/annotations_graph/mp100_split1_val.json',
         img_prefix=f'{data_root}/images/',
+        # img_prefix=f'{data_root}',
         data_cfg=data_cfg,
         valid_class_ids=None,
         max_kpt_num=channel_cfg['max_kpt_num'],
@@ -170,9 +183,10 @@ data = dict(
         num_episodes=100,
         pipeline=valid_pipeline),
     test=dict(
-        type='TestPoseDataset',
+        type='TestFlowPoseDataset',
         ann_file=f'{data_root}/annotations_graph/mp100_split1_test.json',
         img_prefix=f'{data_root}/images/',
+        # img_prefix=f'{data_root}',
         data_cfg=data_cfg,
         valid_class_ids=None,
         max_kpt_num=channel_cfg['max_kpt_num'],

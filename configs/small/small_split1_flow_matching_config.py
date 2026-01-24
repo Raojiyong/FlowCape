@@ -52,6 +52,16 @@ model = dict(
     # pretrained="swinv2_base",
     text_pretrained='pretrained/Alibaba-NLP/gte-base-en-v1.5',
     finetune_text_pretrained=False,
+    align_cfg=dict(
+        enable=True,
+        use_rotation=True,
+        use_scale=True,
+        min_points=2,
+        fallback='translation',
+        init_from_heatmap=True,
+        use_skeleton_weights=False,
+        skeleton_weight_strength=1.0,
+    ),
     encoder_config=dict(
         type='SwinTransformerV2',
         embed_dim=96,
@@ -80,12 +90,19 @@ model = dict(
         rtol=1e-5,
     ),
     # training and testing settings
-    train_cfg=dict(),
+    train_cfg=dict(
+        num_sampled_t=4,
+        ode_step_loss_weight=0.1,
+        with_heatmap_loss=False,
+    ),
     test_cfg=dict(
         flip_test=False,
         post_process='default',
         shift_heatmap=True,
-        modulate_kernel=11))
+        modulate_kernel=11,
+        use_similarity_align_init=True,
+        align_init_from_heatmap=True,
+        align_heatmap_temperature=0.01))
 
 data_cfg = dict(
     image_size=[256, 256],
@@ -114,6 +131,7 @@ train_pipeline = [
         meta_keys=[
             'image_file', 'joints_3d', 'joints_3d_visible', 'center', 'scale',
             'rotation', 'bbox_score', 'flip_pairs', 'category_id', 'skeleton',
+            'align_weight',
         ]),
 ]
 
@@ -133,6 +151,7 @@ valid_pipeline = [
             'image_file', 'joints_3d', 'joints_3d_visible', 'center', 'scale', 'rotation', 'bbox_score',
             'flip_pairs', 'category_id',
             'skeleton',
+            'align_weight',
         ]),
 ]
 
