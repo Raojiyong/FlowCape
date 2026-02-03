@@ -3,9 +3,9 @@ load_from = None
 resume_from = None
 dist_params = dict(backend='nccl')
 workflow = [('train', 1)]
-checkpoint_config = dict(interval=200)
+checkpoint_config = dict(interval=50)
 evaluation = dict(
-    interval=2,
+    interval=10,
     metric=['PCK', 'NME', 'AUC', 'EPE'],
     key_indicator='PCK',
     gpu_collect=True,
@@ -71,10 +71,10 @@ model = dict(
         time_embed_dim=128,
         with_heatmap=True,
         heatmap_size=64,
-        dropout=0.1),  # CAPEx-style iterative refinement
+        dropout=0.1),
     rfm_cfg=dict(
         # Flow ODE solver settings
-        num_timesteps=10,
+        num_timesteps=30,
         t_epsilon=1e-3,
         guidance_scale=0.0,
         atol=1e-5,

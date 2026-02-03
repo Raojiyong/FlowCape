@@ -286,8 +286,9 @@ class FlowPoseModel(BasePose):
         # Target velocity (constant for linear interpolation)
         v_target = x1 - x0  # [B, N, 2]
         
-        # Sample time t ~ U[0, 1]
-        t = torch.rand((bs, 1, 1), device=img_q.device)
+        # Sample time t - biased towards 0 for better velocity learning at low t
+        # Using sqrt gives more weight to low t values where velocity quality matters
+        t = torch.rand((bs, 1, 1), device=img_q.device) ** 0.5  # Biased towards 0
         
         # Interpolate to get x_t
         x_t = (1 - t) * x0 + t * x1  # [B, N, 2]
@@ -349,10 +350,21 @@ class FlowPoseModel(BasePose):
                 if 'heatmap_loss' in head_losses:
                     losses['heatmap_loss'] = head_losses['heatmap_loss']
             
-            # === 4. ODE Loss (optional, for train/test consistency) ===
+            # === 4. Direct t=0 Velocity Loss (NEW: force correct velocity at start) ===
+            t_zero = torch.zeros((bs, 1, 1), device=img_q.device)
+            out_zero, _, _ = self.keypoint_head(
+                feature_q, feature_s, target_s, mask_s,
+                skeleton, all_shots_point_descriptions,
+                coords=x0, t=t_zero)
+            v_pred_zero = out_zero[-1]
+            v_zero_loss = F.mse_loss(v_pred_zero, v_target, reduction='none')
+            v_zero_loss = (v_zero_loss.sum(dim=-1) * mask).sum(dim=-1) / normalizer
+            losses['v_zero_loss'] = v_zero_loss.mean() * 2.0  # Higher weight for t=0
+            
+            # === 5. ODE Loss (for train/test consistency) ===
             if self.train_cfg.get('with_ode_loss', True):
                 x_ode = x0.clone()  # Start from SAME x0 as flow matching
-                num_ode_steps = 3
+                num_ode_steps = self.train_cfg.get('num_ode_steps', 10)  # Match test (was 3)
                 dt = 1.0 / num_ode_steps
                 for step in range(num_ode_steps):
                     t_ode = torch.full((bs, 1, 1), step * dt, device=img_q.device)
@@ -366,6 +378,30 @@ class FlowPoseModel(BasePose):
                 ode_loss = F.l1_loss(x_ode, x1, reduction='none')
                 ode_loss = (ode_loss.sum(dim=-1) * mask).sum(dim=-1) / normalizer
                 losses['ode_loss'] = ode_loss.mean()
+            
+            # === 6. Refinement Layer Loss (CAPEx-style multi-layer supervision) ===
+            if hasattr(self.keypoint_head, 'num_refine_layers') and self.keypoint_head.num_refine_layers > 0:
+                # Get features for refinement
+                feat = self.keypoint_head.img_proj(feature_q)
+                masks_pos = feat.new_zeros((bs, feat.shape[2], feat.shape[3]), dtype=torch.bool)
+                pos_embed = self.keypoint_head.positional_encoding(masks_pos)
+                memory = (feat + pos_embed).flatten(2).transpose(1, 2)
+                
+                # Joint training: allow gradient flow to flow matching
+                x_refine = pred_coords
+                
+                # Loss weight for refinement (lower to avoid dominating training)
+                refine_weight = self.train_cfg.get('refine_loss_weight', 0.1)
+                
+                # Apply refinement and compute loss for each layer
+                for layer_idx, layer in enumerate(self.keypoint_head.refine_layers):
+                    delta = layer(x_refine, memory, self.keypoint_head.coord_proj, mask_s)
+                    x_refine = x_refine + delta
+                    
+                    # L1 loss for this layer (with reduced weight)
+                    layer_loss = F.l1_loss(x_refine, x1, reduction='none')
+                    layer_loss = (layer_loss.sum(dim=-1) * mask).sum(dim=-1) / normalizer
+                    losses[f'refine_loss_layer{layer_idx}'] = layer_loss.mean() * refine_weight
             
             # Accuracy using single-step prediction
             keypoint_accuracy = self.keypoint_head.get_accuracy(
@@ -403,7 +439,8 @@ class FlowPoseModel(BasePose):
         img_size = torch.tensor([img_width, img_height], device=img_q.device).float()
         
         # === Rectified Flow: x0 = Support Pose (centered) - SAME as training! ===
-        x = self._get_centered_support_pose(img_metas, img_q.device, img_size, mask_s)
+        x0 = self._get_centered_support_pose(img_metas, img_q.device, img_size, mask_s)
+        x = x0.clone()
         
         # ODE integration from t=0 to t=1
         num_steps = self.rfm_cfg.num_timesteps if hasattr(self, 'rfm_cfg') else 10
@@ -428,6 +465,17 @@ class FlowPoseModel(BasePose):
             
             # Euler step
             x = x + v_pred * dt
+        
+        # === Iterative Refinement (CAPEx-style) ===
+        if hasattr(self.keypoint_head, 'num_refine_layers') and self.keypoint_head.num_refine_layers > 0:
+            # Get memory for refinement
+            feat = self.keypoint_head.img_proj(feature_q)
+            masks_pos = feat.new_zeros((batch_size, feat.shape[2], feat.shape[3]), dtype=torch.bool)
+            pos_embed = self.keypoint_head.positional_encoding(masks_pos)
+            memory = (feat + pos_embed).flatten(2).transpose(1, 2)
+            
+            # Apply refinement layers
+            x, _ = self.keypoint_head.refine(x, memory, mask_s)
         
         # Clamp final result to valid range
         x = x.clamp(0.0, 1.0)

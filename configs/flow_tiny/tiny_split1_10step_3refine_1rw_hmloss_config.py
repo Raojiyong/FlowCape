@@ -71,7 +71,9 @@ model = dict(
         time_embed_dim=128,
         with_heatmap=True,
         heatmap_size=64,
-        dropout=0.1),  # CAPEx-style iterative refinement
+        dropout=0.1,
+        num_refine_layers=3,
+        num_graph_layers=3),  # CAPEx-style iterative refinement
     rfm_cfg=dict(
         # Flow ODE solver settings
         num_timesteps=10,
@@ -83,7 +85,8 @@ model = dict(
     # training and testing settings
     train_cfg=dict(
         with_ode_loss=True,
-        with_heatmap_loss=False,
+        with_heatmap_loss=True,
+        refine_loss_weight=0.1,
     ),
     test_cfg=dict(
         use_flow_ode=True,
@@ -172,7 +175,7 @@ data = dict(
         pipeline=train_pipeline),
     val=dict(
         type='TransformerFlowPoseDataset',
-        ann_file=f'{data_root}/annotations_graph/mp100_split1_val.json',
+        ann_file=f'{data_root}/annotations_graph/mp100_split1_test.json',
         img_prefix=f'{data_root}/images/',
         # img_prefix=f'{data_root}',
         data_cfg=data_cfg,

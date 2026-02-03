@@ -5,7 +5,7 @@ dist_params = dict(backend='nccl')
 workflow = [('train', 1)]
 checkpoint_config = dict(interval=200)
 evaluation = dict(
-    interval=2,
+    interval=10,
     metric=['PCK', 'NME', 'AUC', 'EPE'],
     key_indicator='PCK',
     gpu_collect=True,
@@ -24,6 +24,7 @@ lr_config = dict(
     warmup_ratio=0.001,
     step=[160, 180])
 total_epochs = 200
+# total_epochs = 1
 log_config = dict(
     interval=500,
     hooks=[
@@ -47,19 +48,17 @@ channel_cfg = dict(
 # model settings
 model = dict(
     type='FlowPoseModel',
-    pretrained='pretrained/swinv2_tiny_patch4_window16_256.pth',
+    pretrained='pretrained/swinv2_small_1k_500k.pth',
+    # pretrained="swinv2_base",
     text_pretrained='pretrained/Alibaba-NLP/gte-base-en-v1.5',
     finetune_text_pretrained=False,
-    align_cfg=dict(
-        enable=False,  # Not used in Rectified Flow
-    ),
     encoder_config=dict(
         type='SwinTransformerV2',
         embed_dim=96,
-        depths=[2, 2, 6, 2],
+        depths=[2, 2, 18, 2],
         num_heads=[3, 6, 12, 24],
         window_size=16,
-        drop_path_rate=0.2,
+        drop_path_rate=0.3,
         img_size=256,
         upsample="bilinear"
     ),
@@ -71,7 +70,8 @@ model = dict(
         time_embed_dim=128,
         with_heatmap=True,
         heatmap_size=64,
-        dropout=0.1),  # CAPEx-style iterative refinement
+        dropout=0.1,
+        num_refine_layers=3),
     rfm_cfg=dict(
         # Flow ODE solver settings
         num_timesteps=10,
@@ -124,8 +124,7 @@ train_pipeline = [
         keys=['img', 'target', 'target_weight'],
         meta_keys=[
             'image_file', 'joints_3d', 'joints_3d_visible', 'center', 'scale',
-            'rotation', 'bbox', 'bbox_score', 'flip_pairs', 'category_id', 'skeleton',
-            'align_weight',
+            'rotation', 'bbox_score', 'flip_pairs', 'category_id', 'skeleton',
         ]),
 ]
 
@@ -142,10 +141,9 @@ valid_pipeline = [
         type='Collect',
         keys=['img', 'target', 'target_weight'],
         meta_keys=[
-            'image_file', 'joints_3d', 'joints_3d_visible', 'center', 'scale', 'rotation', 'bbox', 'bbox_score',
+            'image_file', 'joints_3d', 'joints_3d_visible', 'center', 'scale', 'rotation', 'bbox_score',
             'flip_pairs', 'category_id',
             'skeleton',
-            'align_weight',
         ]),
 ]
 
@@ -172,7 +170,7 @@ data = dict(
         pipeline=train_pipeline),
     val=dict(
         type='TransformerFlowPoseDataset',
-        ann_file=f'{data_root}/annotations_graph/mp100_split1_val.json',
+        ann_file=f'{data_root}/annotations_graph/mp100_split1_test.json',
         img_prefix=f'{data_root}/images/',
         # img_prefix=f'{data_root}',
         data_cfg=data_cfg,

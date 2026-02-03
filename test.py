@@ -156,7 +156,8 @@ def main():
             print(f'{k}: {v}')
 
         # save testing log
-        test_log = f"./work_dirs/test_log_{os.path.splitext(os.path.basename(args.config))[0]}.txt"
+        # test_log = f"./work_dirs/test_log_{os.path.splitext(os.path.basename(args.config))[0]}.txt"
+        test_log = "./work_dirs/testing_log.txt"
         with open(test_log, 'a') as f:
             f.write("**  config_file: " + args.config + "\t checkpoint: " + args.checkpoint + "\t \n")
             for k, v in sorted(results.items()):

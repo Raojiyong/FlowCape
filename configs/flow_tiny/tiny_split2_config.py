@@ -3,9 +3,9 @@ load_from = None
 resume_from = None
 dist_params = dict(backend='nccl')
 workflow = [('train', 1)]
-checkpoint_config = dict(interval=200)
+checkpoint_config = dict(interval=50)
 evaluation = dict(
-    interval=2,
+    interval=1,
     metric=['PCK', 'NME', 'AUC', 'EPE'],
     key_indicator='PCK',
     gpu_collect=True,
@@ -51,7 +51,7 @@ model = dict(
     text_pretrained='pretrained/Alibaba-NLP/gte-base-en-v1.5',
     finetune_text_pretrained=False,
     align_cfg=dict(
-        enable=False,  # Not used in Rectified Flow
+        enable=False,  # Not used in Rectified Flow (x0 = centered support pose)
     ),
     encoder_config=dict(
         type='SwinTransformerV2',
@@ -71,10 +71,10 @@ model = dict(
         time_embed_dim=128,
         with_heatmap=True,
         heatmap_size=64,
-        dropout=0.1),  # CAPEx-style iterative refinement
+        dropout=0.1),
     rfm_cfg=dict(
         # Flow ODE solver settings
-        num_timesteps=10,
+        num_timesteps=30,
         t_epsilon=1e-3,
         guidance_scale=0.0,
         atol=1e-5,
@@ -82,7 +82,7 @@ model = dict(
     ),
     # training and testing settings
     train_cfg=dict(
-        with_ode_loss=True,
+        with_ode_loss=True,  # End-to-end ODE loss for train/test consistency
         with_heatmap_loss=False,
     ),
     test_cfg=dict(
@@ -91,6 +91,8 @@ model = dict(
         post_process='default',
         shift_heatmap=True,
         modulate_kernel=11,
+        use_oracle_mode=True,
+        # Keyness guidance (optional, disabled by default for Rectified Flow)
         use_keyness_guidance=False,
         keyness_lambda=0.1,
         use_keyness_refine=False,
@@ -162,7 +164,7 @@ data = dict(
     # workers_per_gpu=8,
     train=dict(
         type='TransformerFlowPoseDataset',
-        ann_file=f'{data_root}/annotations_graph/mp100_split1_train.json',
+        ann_file=f'{data_root}/annotations_graph/mp100_split2_train.json',
         img_prefix=f'{data_root}/images/',
         # img_prefix=f'{data_root}',
         data_cfg=data_cfg,
@@ -172,7 +174,7 @@ data = dict(
         pipeline=train_pipeline),
     val=dict(
         type='TransformerFlowPoseDataset',
-        ann_file=f'{data_root}/annotations_graph/mp100_split1_val.json',
+        ann_file=f'{data_root}/annotations_graph/mp100_split2_val.json',
         img_prefix=f'{data_root}/images/',
         # img_prefix=f'{data_root}',
         data_cfg=data_cfg,
@@ -184,7 +186,7 @@ data = dict(
         pipeline=valid_pipeline),
     test=dict(
         type='TestFlowPoseDataset',
-        ann_file=f'{data_root}/annotations_graph/mp100_split1_test.json',
+        ann_file=f'{data_root}/annotations_graph/mp100_split2_test.json',
         img_prefix=f'{data_root}/images/',
         # img_prefix=f'{data_root}',
         data_cfg=data_cfg,

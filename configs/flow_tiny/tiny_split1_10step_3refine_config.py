@@ -71,7 +71,8 @@ model = dict(
         time_embed_dim=128,
         with_heatmap=True,
         heatmap_size=64,
-        dropout=0.1),  # CAPEx-style iterative refinement
+        dropout=0.1,
+        num_refine_layers=3),  # CAPEx-style iterative refinement
     rfm_cfg=dict(
         # Flow ODE solver settings
         num_timesteps=10,

@@ -39,6 +39,57 @@ from models.models.utils.graph_flow_encoder import (
 from models.models.utils.positional_encoding import SinePositionalEncoding
 
 
+class RefineLayer(nn.Module):
+    """Single refinement layer for iterative pose refinement (CAPEx-style).
+    
+    Uses cross-attention to image features to predict coordinate deltas.
+    """
+    
+    def __init__(self, hidden_dim, num_heads=8, dropout=0.1):
+        super().__init__()
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=hidden_dim, num_heads=num_heads, 
+            dropout=dropout, batch_first=True)
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim * 4, hidden_dim),
+        )
+        self.norm1 = nn.LayerNorm(hidden_dim)
+        self.norm2 = nn.LayerNorm(hidden_dim)
+        self.delta_proj = nn.Linear(hidden_dim, 2)  # Output delta coordinates
+        
+        # Initialize to small values for stable training
+        nn.init.zeros_(self.delta_proj.weight)
+        nn.init.zeros_(self.delta_proj.bias)
+    
+    def forward(self, coords, memory, coord_proj, mask):
+        """
+        Args:
+            coords: [B, N, 2] current coordinate estimates
+            memory: [B, HW, hidden] image features
+            coord_proj: nn.Linear to project coords to hidden dim
+            mask: [B, N, 1] visibility mask
+        Returns:
+            delta: [B, N, 2] coordinate refinement
+        """
+        # Project coords to hidden dim
+        query = coord_proj(coords) * mask.float()  # [B, N, hidden]
+        
+        # Cross attention to image features
+        attn_out, _ = self.cross_attn(query, memory, memory)
+        query = self.norm1(query + attn_out)
+        
+        # FFN
+        ffn_out = self.ffn(query)
+        query = self.norm2(query + ffn_out)
+        
+        # Predict delta
+        delta = self.delta_proj(query) * mask  # [B, N, 2]
+        return delta
+
+
 @dataclass
 class RiemannianHeadConfig:
     in_channels: int
@@ -64,11 +115,14 @@ class RiemannianPoseHead(nn.Module):
                  heatmap_size=64,
                  temperature=0.01,
                  dropout=0.1,
+                 num_refine_layers=0,
+                 num_graph_layers=3,
                  train_cfg=None,
                  test_cfg=None):
         super().__init__()
         self.with_heatmap = with_heatmap
         self.heatmap_size = heatmap_size
+        self.hidden_dim = hidden_dim
         self.train_cfg = {} if train_cfg is None else train_cfg
         self.test_cfg = {} if test_cfg is None else test_cfg
 
@@ -85,9 +139,17 @@ class RiemannianPoseHead(nn.Module):
             GraphFlowConfig(
                 dim=hidden_dim,
                 nhead=8,
-                num_layers=3,
+                num_layers=num_graph_layers,
                 time_embed_dim=time_embed_dim,
                 dropout=dropout))
+
+        # Iterative refinement layers (CAPEx-style)
+        self.num_refine_layers = num_refine_layers
+        if num_refine_layers > 0:
+            self.refine_layers = nn.ModuleList([
+                RefineLayer(hidden_dim, num_heads=8, dropout=dropout)
+                for _ in range(num_refine_layers)
+            ])
 
         self.init_weights()
 
@@ -171,6 +233,29 @@ class RiemannianPoseHead(nn.Module):
         # Output velocity field v_pred for flow matching
         output = v_pred.unsqueeze(0)  # [1, B, N, 2] velocity field
         return output, coords, heatmap
+
+    def refine(self, coords, memory, mask_s):
+        """Apply iterative refinement layers.
+        
+        Args:
+            coords: [B, N, 2] current coordinate estimates
+            memory: [B, HW, hidden] image features
+            mask_s: [B, N, 1] visibility mask
+            
+        Returns:
+            refined_coords: [B, N, 2] refined coordinates
+            all_deltas: list of deltas from each layer (for loss computation)
+        """
+        if self.num_refine_layers == 0:
+            return coords, []
+        
+        all_deltas = []
+        for layer in self.refine_layers:
+            delta = layer(coords, memory, self.coord_proj, mask_s)
+            coords = coords + delta
+            all_deltas.append(delta)
+        
+        return coords, all_deltas
 
     def get_loss(self,
                  output,
